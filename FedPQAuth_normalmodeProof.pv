@@ -1,0 +1,787 @@
+(*
+   FinalProtocol_v1.pv
+   ProVerif Model: PQ-CA-HFL Protocol
+   Phases: Registration + Static Authentication + HKDF Key Derivation
+           + Continuous Authentication (Normal Mode)
+
+   Assumptions:
+   - c: client, CH: cluster head, CS: cloud server
+   - Initialization executed once by CS
+   - Registration over private channels
+   - CS is honest-but-curious; CH is semi-trusted
+   - Static and continuous authentication over public channels
+   - Dolev-Yao attacker on public channels
+   - Kyber abstracted as correct KEM
+   
+*)
+
+(* 
+   SECTION 1: Channels
+   *)
+
+(* Public channels *)
+free c_CH  : channel.   (* Client --> CH *)
+free CH_CS : channel.   (* CH --> CS     *)
+free CS_CH : channel.   (* CS --> CH     *)
+free CH_c  : channel.   (* CH --> Client *)
+
+(* Private registration channels *)
+free c_CS_reg  : channel [private].  (* Client registers with CS *)
+free CH_CS_reg : channel [private].  (* CH registers with CS*)
+
+(* 
+   SECTION 2: Types
+    *)
+
+type timestamp.
+type pkey.
+type skey.
+type ciphertext.
+type sskey.
+
+(* ===================================================================
+   SECTION 3: Long-term secrets and public constants
+   =================================================================== *)
+
+(* Client long-term private values *)
+free RID    : bitstring [private].
+free K_id   : bitstring [private].
+free K_CH_reg : bitstring [private]. 
+free s_c    : bitstring [private].
+free salt_CS : bitstring [private].
+free salt_CH : bitstring [private].
+
+(* Secrecy test values for HKDF-derived keys *)
+free secret_data_test  : bitstring [private].
+free secret_beh_test   : bitstring [private].
+free secret_chcs_test  : bitstring [private].
+free secret_cch_test  : bitstring [private].
+free secret_ccs_test  : bitstring [private].
+
+(* Public identifiers *)
+free CHID : bitstring.
+free ACK  : bitstring.
+free round1 : bitstring.
+
+(* CH and CS long-term KEM secret keys *)
+free SK_CH : skey [private].
+free SK_CS : skey [private].
+
+
+
+(* ===================================================================
+   SECTION 4: Cryptographic primitives
+   =================================================================== *)
+
+(* Timestamp creation *)
+fun create_timestamp(bitstring): timestamp.
+
+(* Hash and HMAC *)
+fun Hash(bitstring): bitstring.
+fun HMAC(bitstring, bitstring): bitstring.
+
+fun make_sid(bitstring, ciphertext, ciphertext, timestamp): bitstring.
+
+(* Concatenation helpers *)
+fun Concat2(bitstring, bitstring): bitstring.
+fun Concat3(bitstring, bitstring, bitstring): bitstring.
+fun Concat4(bitstring, bitstring, bitstring, bitstring): bitstring.
+fun Concat5(bitstring, bitstring, bitstring, bitstring, bitstring): bitstring.
+fun Concat6(bitstring, bitstring, bitstring, bitstring, bitstring, bitstring): bitstring.
+fun Concat7(bitstring, bitstring, bitstring, bitstring, bitstring, bitstring, bitstring): bitstring.
+
+(* Kyber KEM *)
+fun pk(skey): pkey.
+fun kyber_encaps_ct(pkey, bitstring): ciphertext.
+fun kyber_encaps_ss(pkey, bitstring): sskey.
+
+reduc forall sk: skey, r: bitstring;
+  kyber_decaps(kyber_encaps_ct(pk(sk), r), sk)
+  = kyber_encaps_ss(pk(sk), r).
+
+(* Type conversion functions *)
+fun cipherToBS(ciphertext): bitstring.
+fun TSToBS(timestamp): bitstring.
+fun sskeyToBS(sskey): bitstring.
+
+(* ===================================================================
+   SECTION 5: HKDF primitives
+   Two-level structure: Root key -> Chain key -> per-round keys
+   =================================================================== *)
+
+fun HKDF_extract(bitstring, bitstring): bitstring.
+fun derive_chainKey(bitstring, bitstring, bitstring): bitstring.
+fun derive_HMACKey(bitstring, bitstring, bitstring): bitstring.
+fun derive_dataKey(bitstring, bitstring, bitstring): bitstring.
+fun derive_behKey(bitstring, bitstring, bitstring): bitstring.
+
+(* 
+   SECTION 6: PRG and masking/unmasking
+   *)
+
+fun PRG_beh(bitstring): bitstring.
+fun PRG_data(bitstring): bitstring.
+
+fun mask_beh(bitstring, bitstring): bitstring.
+fun mask_data(bitstring, bitstring): bitstring.
+
+reduc forall m: bitstring, k: bitstring;
+  unmask_beh(mask_beh(m, PRG_beh(k)), PRG_beh(k)) = m.
+
+reduc forall m: bitstring, k: bitstring;
+  unmask_data(mask_data(m, PRG_data(k)), PRG_data(k)) = m.
+
+(* ===================================================================
+   SECTION 7: Events
+   =================================================================== *)
+
+(* --- Registration Phase Events --- *)
+event begin_reg_c(bitstring).
+event end_reg_c(bitstring).
+event begin_reg_CH(bitstring).
+event end_reg_CH(bitstring).
+
+(* Registration-to-Static linkage events *)
+(* Client: binds RID and K_id *)
+event RegisteredClientForStatic(bitstring, bitstring).
+event StaticUsesRegisteredClient(bitstring, bitstring).
+(* CH: binds CHID *)
+event RegisteredCHForStatic(bitstring).
+event StaticUsesRegisteredCH(bitstring).
+
+(* --- Static Authentication Phase Events --- *)
+(* Client sends M1 to CH *)
+event begin_c_CH(bitstring).
+(* CH verifies M2: CH authenticates client *)
+event end_c_at_CH(bitstring).
+event kem_confirmed_c_at_CH(bitstring).
+
+(* Client sends M1 (forwarded via CH to CS) *)
+event begin_c_CS(bitstring).
+(* CS verifies M1: CS authenticates client through forwarded transcript *)
+event end_c_at_CS(bitstring).
+
+(* CH sends M3 to CS *)
+event begin_CH_CS(bitstring).
+(* CS verifies M3: CS authenticates CH *)
+event end_CH_at_CS(bitstring).
+
+
+(* CS sends ACK_CH, ACK_c to CH *)
+event begin_CS_CH(bitstring).
+(* CH verifies ACK_CH: CH authenticates CS reply *)
+event end_CS_at_CH(bitstring).
+event end_CS_at_CH_for_client(bitstring).
+
+(* CH sends M4 to client *)
+event begin_CH_c(bitstring).
+(* Client verifies M4: client authenticates CH reply *)
+event end_CH_at_c(bitstring).
+
+(* CS sends ACK_c (forwarded via CH to client) *)
+event begin_CS_c(bitstring).
+(* Client verifies ACK_c: client authenticates CS acknowledgment through CH *)
+event end_CS_at_c(bitstring).
+
+(* --- HKDF Milestone Events --- *)
+event ClientDerivedDataPlane(bitstring, bitstring, bitstring, bitstring, bitstring).
+event CSDerivedDataPlane(bitstring, bitstring, bitstring, bitstring, bitstring).
+event ClientDerivedBehPlane(bitstring, bitstring, bitstring, bitstring, bitstring).
+event CHDerivedBehPlane(bitstring, bitstring, bitstring, bitstring, bitstring).
+
+(* --- Continuous Authentication Phase Events --- *)
+(* Client sends authenticated behavior message to CH *)
+event begin_cont_c_CH(bitstring).
+(* CH verifies Auth_CH: CH authenticates client continuous message *)
+event end_cont_c_at_CH(bitstring).
+
+(* CH sends Auth_CHCS report to CS *)
+event begin_cont_CH_CS(bitstring).
+(* CS verifies Auth_CHCS: CS authenticates CH continuous report *)
+event end_cont_CH_at_CS(bitstring).
+
+(* Reserved for suspicious mode - not used in normal mode queries *)
+event begin_cont_c_CS(bitstring).
+event end_cont_c_at_CS(bitstring).
+
+(* ===================================================================
+   SECTION 8: Secrecy Queries
+   =================================================================== *)
+
+query attacker(RID).
+query attacker(K_id).
+query attacker(s_c).
+query attacker(secret_data_test).
+query attacker(secret_beh_test).
+query attacker(K_CH_reg).
+query attacker(secret_cch_test).
+query attacker(secret_chcs_test).
+query attacker(secret_ccs_test).
+
+(* ===================================================================
+   SECTION 9: Registration Queries
+   =================================================================== *)
+
+(* Client registration correspondence *)
+query x: bitstring;
+  inj-event(end_reg_c(x)) ==> inj-event(begin_reg_c(x)).
+
+(* CH registration correspondence *)
+query x: bitstring;
+  inj-event(end_reg_CH(x)) ==> inj-event(begin_reg_CH(x)).
+
+(* Registration-to-Static linkage: client *)
+query rid: bitstring, kid: bitstring;
+  event(StaticUsesRegisteredClient(rid, kid))
+  ==> event(RegisteredClientForStatic(rid, kid)).
+
+(* Registration-to-Static linkage: CH *)
+query chid: bitstring;
+  event(StaticUsesRegisteredCH(chid))
+  ==> event(RegisteredCHForStatic(chid)).
+
+(* ===================================================================
+   SECTION 10: Static Authentication Queries
+   =================================================================== *)
+
+(* CH authenticates client (via M2) *)
+query x: bitstring;
+  inj-event(end_c_at_CH(x)) ==> inj-event(begin_c_CH(x)).
+
+(* CS authenticates client through forwarded transcript (via M1) *)
+query x: bitstring;
+  inj-event(end_c_at_CS(x)) ==> inj-event(begin_c_CS(x)).
+
+(* CS authenticates CH (via M3) *)
+query x: bitstring;
+  inj-event(end_CH_at_CS(x)) ==> inj-event(begin_CH_CS(x)).
+
+(* CH authenticates CS reply (via ACK_CH) *)
+query x: bitstring;
+  inj-event(end_CS_at_CH(x)) ==> inj-event(begin_CS_CH(x)).
+
+(* Client authenticates CH reply (via M4) *)
+query x: bitstring;
+  inj-event(end_CH_at_c(x)) ==> inj-event(begin_CH_c(x)).
+
+(* Client authenticates CS acknowledgment through CH (via ACK_c) *)
+query x: bitstring;
+  inj-event(end_CS_at_c(x)) ==> inj-event(begin_CS_c(x)).
+
+(* ===================================================================
+   SECTION 11: HKDF Milestone Queries
+   =================================================================== *)
+
+(* Client derives data plane only after completing static auth *)
+query pid: bitstring, rk: bitstring, kh: bitstring, kd: bitstring, ck: bitstring;
+  event(ClientDerivedDataPlane(pid, rk, kh, kd, ck))
+  ==> event(end_CH_at_c(pid)).
+
+(* CS derives data plane only after completing static auth *)
+query pid: bitstring, rk: bitstring, kh: bitstring, kd: bitstring, ck: bitstring;
+  event(CSDerivedDataPlane(pid, rk, kh, kd, ck))
+  ==> event(end_c_at_CS(pid)).
+
+(* Client derives behavior plane only after completing static auth *)
+query pid: bitstring, rk: bitstring, kh: bitstring, kb: bitstring, ck: bitstring;
+  event(ClientDerivedBehPlane(pid, rk, kh, kb, ck))
+  ==> event(end_CH_at_c(pid)).
+
+(* CH derives behavior plane only after completing static auth *)
+query pid: bitstring, rk: bitstring, kh: bitstring, kb: bitstring, ck: bitstring;
+  event(CHDerivedBehPlane(pid, rk, kh, kb, ck))
+  ==>
+  event(end_CS_at_CH_for_client(pid)).
+
+(* ===================================================================
+   SECTION 12: Continuous Authentication Queries (Normal Mode)
+   =================================================================== *)
+
+(* If CH accepts a continuous client message, client previously sent it *)
+query x: bitstring;
+  inj-event(end_cont_c_at_CH(x)) ==> inj-event(begin_cont_c_CH(x)).
+
+(* If CS accepts a CH continuous report, CH previously sent that report *)
+query x: bitstring;
+  inj-event(end_cont_CH_at_CS(x)) ==> inj-event(begin_cont_CH_CS(x)).
+
+(*
+   Normal mode: CS does NOT directly verify client Auth_CS.
+   Direct client-to-CS verification is reserved for suspicious mode.
+   The following query is intentionally commented out:
+   query x: bitstring;
+     inj-event(end_cont_c_at_CS(x)) ==> inj-event(begin_cont_c_CS(x)).
+*)
+
+(* ===================================================================
+   SECTION 13: Protocol Processes
+   =================================================================== *)
+
+(* -------------------------------------------------------------------
+   CLIENT PROCESS
+   Phases:
+   1. Registration with CS over private channel
+   2. Static authentication (M1 send, M4/ACK_c receive and verify)
+   3. HKDF key derivation (data plane + behavior plane)
+   4. Continuous authentication (one round, normal mode)
+   ------------------------------------------------------------------- *)
+let Client =
+
+  (* === Registration Phase === *)
+  new SK_c: skey;
+  let PK_c = pk(SK_c) in
+  event begin_reg_c(RID);
+  out(c_CS_reg, (RID, PK_c));
+  in(c_CS_reg, (ack_c: bitstring, RID_ack: bitstring, K_idc: bitstring, sc_c: bitstring));
+   if ack_c = ACK then
+    if RID_ack = RID then
+   event end_reg_c(RID);
+   event StaticUsesRegisteredClient(RID, K_idc);
+
+  (* === Static Authentication Phase: Client sends M1 === *)
+  new x: bitstring;
+  new TS1: timestamp;
+  
+  
+
+  (* PIDc = HMAC(Kid, RIDc || x) *)
+  let PID_c = HMAC(K_idc, Concat2(RID, x)) in
+  new r_c_CH: bitstring;
+  (* Client-to-CH KEM encapsulation *)
+  let ct_c_CH = kyber_encaps_ct(pk(SK_CH), r_c_CH) in
+  let ss_c_CH = kyber_encaps_ss(pk(SK_CH), r_c_CH) in
+
+  (* Client-to-CS KEM encapsulation *)
+  new r_c_CS: bitstring;
+  let ct_c_CS = kyber_encaps_ct(pk(SK_CS), r_c_CS) in
+  let ss_c_CS = kyber_encaps_ss(pk(SK_CS), r_c_CS) in
+
+  (* M1 = HMAC(Kid, PIDc || ctC,CH || ctC,CS || TS1 || CHID) *)
+  let M1 = HMAC(K_idc,
+               Concat5(PID_c,
+                       cipherToBS(ct_c_CH),
+                       cipherToBS(ct_c_CS),
+                       TSToBS(TS1),
+                       CHID)) in
+
+  (* M2 = HMAC(KC,CH, PIDc || ctC,CH || ctC,CS || TS1 || CHID) *)
+  let M2 = HMAC(sskeyToBS(ss_c_CH),
+               Concat5(PID_c,
+                       cipherToBS(ct_c_CH),
+                       cipherToBS(ct_c_CS),
+                       TSToBS(TS1),
+                       CHID)) in
+
+  event begin_c_CH(PID_c);
+  event begin_c_CS(PID_c);
+  out(c_CH, (PID_c, ct_c_CH, ct_c_CS, CHID, TS1, M1, M2));
+
+  (* === Static Authentication Phase: Client receives M4 and ACK_c === *)
+  in(CH_c, (PID_c_r: bitstring, CHID_r: bitstring,
+            TS3: timestamp, TS4: timestamp,
+            ACK_c_r: bitstring, M4_r: bitstring));
+
+  (* ACKC = HMAC(KC,CS, PIDc || CHID || TS1 || TS3) *)
+  let ACK_c_check =
+    HMAC(sskeyToBS(ss_c_CS),
+         Concat4(PID_c_r, CHID_r, TSToBS(TS1), TSToBS(TS3))) in
+  if ACK_c_r = ACK_c_check then
+  event end_CS_at_c(PID_c_r);
+
+  (* M4 = HMAC(KC,CH, PIDc || CHID || TS3 || TS4) *)
+  let M4_check =
+    HMAC(sskeyToBS(ss_c_CH),
+         Concat4(PID_c_r, CHID_r, TSToBS(TS3), TSToBS(TS4))) in
+  if M4_r = M4_check then
+  event end_CH_at_c(PID_c_r);
+
+  (* === HKDF Key Derivation Phase === *)
+  (* Session and round identifiers *)
+  let sid = make_sid(PID_c_r, ct_c_CH, ct_c_CS, TS1) in
+
+  (* Data/Model Plane: C <-> CS
+     RK_CS = HKDF-Extract(K_C,CS, salt_CS)
+     CKD_ij = derive_chainKey(RK_CS, sid, rid)
+     KDHMAC_ij = derive_HMACKey(CKD_ij, sid, rid)
+     Kdata_ij  = derive_dataKey(CKD_ij, sid, rid)
+  *)
+  let RK_CS     = HKDF_extract(sskeyToBS(ss_c_CS), salt_CS) in
+  let CKD_ij    = derive_chainKey(RK_CS, sid, round1) in
+  let KDHMAC_ij = derive_HMACKey(CKD_ij, sid, round1) in
+  let Kdata_ij  = derive_dataKey(CKD_ij, sid, round1) in
+
+  event ClientDerivedDataPlane(PID_c_r, RK_CS, KDHMAC_ij, Kdata_ij, CKD_ij);
+
+  (* Behavior Plane: C <-> CH
+     RK_CH = HKDF-Extract(K_C,CH, salt_CH)
+     CKB_ij = derive_chainKey(RK_CH, sid, rid)
+     KBHMAC_ij = derive_HMACKey(CKB_ij, sid, rid)
+     Kbeh_ij   = derive_behKey(CKB_ij, sid, rid)
+  *)
+  let RK_CH     = HKDF_extract(sskeyToBS(ss_c_CH), salt_CH) in
+  let CKB_ij    = derive_chainKey(RK_CH, sid, round1) in
+  let KBHMAC_ij = derive_HMACKey(CKB_ij, sid, round1) in
+  let Kbeh_ij   = derive_behKey(CKB_ij, sid, round1) in
+
+  event ClientDerivedBehPlane(PID_c_r, RK_CH, KBHMAC_ij, Kbeh_ij, CKB_ij);
+
+  (* === Continuous Authentication Phase: Client (Normal Mode) ===
+     Client sends:
+       - Masked behavior evidence M_Beh
+       - Masked gradient/data evidence M_data
+       - Auth_CH for CH verification
+       - Auth_CS reserved for suspicious mode (sent but not verified by CS in normal mode)
+  *)
+  new TS5: timestamp;
+  new Beh: bitstring;
+  new Grad: bitstring;
+
+  let Mbeh  = mask_beh(Beh, PRG_beh(Kbeh_ij)) in
+  let Mdata = mask_data(Grad,  PRG_data(Kdata_ij)) in
+
+  (* Auth_CH = HMAC(KB_HMAC_ij, PIDc || j || TS1 || H(M_Beh)) *)
+  let Auth_CH =
+    HMAC(KBHMAC_ij,
+         Concat3(PID_c_r, TSToBS(TS5), Hash(Mbeh))) in
+
+  (* Auth_CS = HMAC(KD_HMAC_ij, PIDc || j || TS1 || H(M_data))
+     Reserved for suspicious mode; sent but not verified by CS in normal mode *)
+  let Auth_CS =
+    HMAC(KDHMAC_ij,
+         Concat3(PID_c_r, TSToBS(TS5), Hash(Mdata))) in
+
+  event begin_cont_c_CH(PID_c_r);
+  (* begin_cont_c_CS is reserved for suspicious mode *)
+  out(c_CH, (PID_c_r, sid, round1, TS5, Mbeh, Mdata, Auth_CH, Auth_CS)).
+
+
+(* -------------------------------------------------------------------
+   CLUSTER HEAD (CH) PROCESS
+   Phases:
+   1. Registration with CS over private channel
+   2. Static authentication (receive M1, verify M2, send M3; receive ACK_CH, verify, send M4)
+   3. HKDF key derivation (behavior plane + CH-CS plane)
+   4. Continuous authentication (one round, normal mode)
+   ------------------------------------------------------------------- *)
+let ClusterHead =
+
+  (* === Registration Phase === *)
+  let PK_CH = pk(SK_CH) in
+  event begin_reg_CH(CHID);
+  out(CH_CS_reg, (CHID, PK_CH));
+  in(CH_CS_reg, (ack_CH: bitstring, CHID_ack: bitstring, K_CH_reg_received: bitstring));
+  if ack_CH = ACK then
+  if CHID_ack = CHID then
+  event end_reg_CH(CHID);
+  event StaticUsesRegisteredCH(CHID); 
+  (* === Static Authentication Phase: CH receives M1 from Client === *)
+  in(c_CH, (PID_c: bitstring,
+            ct_c_CH: ciphertext,
+            ct_c_CS: ciphertext,
+            CHID_r: bitstring,
+            TS1: timestamp,
+            M1_r: bitstring,
+            M2_r: bitstring));
+
+  (* CH decapsulates to get C-CH session key *)
+  let ss_c_CH = kyber_decaps(ct_c_CH, SK_CH) in
+  (* Secrecy test for the C-CH session key *)
+  let protected_cch_test =
+  mask_beh(secret_cch_test, PRG_beh(sskeyToBS(ss_c_CH))) in
+  out(CH_c, protected_cch_test);
+
+  (* Verify M2 = HMAC(KC,CH, PIDc || ctC,CH || ctC,CS || TS1 || CHID) *)
+  let M2_check =
+    HMAC(sskeyToBS(ss_c_CH),
+         Concat5(PID_c,
+                 cipherToBS(ct_c_CH),
+                 cipherToBS(ct_c_CS),
+                 TSToBS(TS1),
+                 CHID_r)) in
+  if M2_r = M2_check then
+  event kem_confirmed_c_at_CH(PID_c);
+
+  (* CH generates CH-CS KEM encapsulation *)
+  new r_CH_CS: bitstring;
+  let ct_CH_CS = kyber_encaps_ct(pk(SK_CS), r_CH_CS) in
+  let ss_CH_CS =kyber_encaps_ss(pk(SK_CS), r_CH_CS) in
+
+  new TS2: timestamp;
+
+  (* M3 = HMAC(KCH,CS, CHID || ctCH,CS || TS2 || PIDc || ctC,CH || ctC,CS || TS1) *)
+  let M3 =
+    HMAC(K_CH_reg_received,
+         Concat7(CHID_r,
+                 cipherToBS(ct_CH_CS),
+                 TSToBS(TS2),
+                 PID_c,
+                 cipherToBS(ct_c_CH),
+                 cipherToBS(ct_c_CS),
+                 TSToBS(TS1))) in
+
+  event begin_CH_CS(CHID_r);
+  (* Forward client's message plus CH's own message to CS *)
+  out(CH_CS, ((PID_c, ct_c_CH, ct_c_CS, TS1, M1_r),
+              CHID_r, ct_CH_CS, TS2, M3));
+
+  (* === Static Authentication Phase: CH receives ACK_CH from CS, sends M4 to Client === *)
+  in(CS_CH, (PID_c2: bitstring,
+             CHID_r2: bitstring,
+             TS3: timestamp,
+             ACK_CH_r: bitstring,
+             ACK_c_r: bitstring));
+
+  (* ACKCH = HMAC(KCH,CS, PIDc || CHID || ctC,CH || TS1 || TS3) *)
+  let ACK_CH_check =
+    HMAC(sskeyToBS(ss_CH_CS),
+         Concat5(PID_c2,
+                 CHID_r2,
+                 cipherToBS(ct_c_CH),
+                 TSToBS(TS1),
+                 TSToBS(TS3))) in
+  if ACK_CH_r = ACK_CH_check then
+event end_CS_at_CH(CHID_r2);
+event end_CS_at_CH_for_client(PID_c2);
+event end_c_at_CH(PID_c2);
+
+  (* === HKDF Key Derivation Phase (CH side) === *)
+let sid = make_sid(PID_c2, ct_c_CH, ct_c_CS, TS1) in
+
+  (* Behavior Plane: C <-> CH (CH side)
+     RK_CH = HKDF-Extract(K_C,CH, salt_CH)
+     CKB_ij = derive_chainKey(RK_CH, sid, rid)
+     KBHMAC_ij = derive_HMACKey(CKB_ij, sid, rid)
+     Kbeh_ij   = derive_behKey(CKB_ij, sid, rid)
+  *)
+  let RK_CH     = HKDF_extract(sskeyToBS(ss_c_CH), salt_CH) in
+  let CKB_ij    = derive_chainKey(RK_CH, sid, round1) in
+  let KBHMAC_ij = derive_HMACKey(CKB_ij, sid, round1) in
+  let Kbeh_ij   = derive_behKey(CKB_ij, sid, round1) in
+
+  event CHDerivedBehPlane(PID_c2, RK_CH, KBHMAC_ij, Kbeh_ij, CKB_ij);
+
+  (* CH-CS Plane: CH <-> CS
+     RK_CHCS = HKDF-Extract(K_CH,CS, salt_CS)
+     CK_CHCS = derive_chainKey(RK_CHCS, sid, rid)
+     KHMAC_CHCS = derive_HMACKey(CK_CHCS, sid, rid)
+  *)
+  let RK_CHCS    = HKDF_extract(sskeyToBS(ss_CH_CS), salt_CS) in
+  let CK_CHCS    = derive_chainKey(RK_CHCS, sid, round1) in
+  let KHMAC_CHCS = derive_HMACKey(CK_CHCS, sid, round1) in
+
+  (* Secrecy test for behavior key *)
+  let protected_beh_test = mask_beh(secret_beh_test, PRG_beh(Kbeh_ij)) in
+  out(CH_c, protected_beh_test);
+
+  (* Secrecy test for CH-CS HMAC key *)
+  let protected_chcs_test = mask_data(secret_chcs_test, PRG_data(KHMAC_CHCS)) in
+  out(CH_CS, protected_chcs_test);
+
+  (* === Static Authentication Phase: CH sends M4 to Client === *)
+  new TS4: timestamp;
+
+  (* M4 = HMAC(KC,CH, PIDc || CHID || TS3 || TS4) *)
+  let M4 =
+    HMAC(sskeyToBS(ss_c_CH),
+         Concat4(PID_c2, CHID_r, TSToBS(TS3), TSToBS(TS4))) in
+
+  event begin_CH_c(PID_c2);
+  out(CH_c, (PID_c2, CHID_r, TS3, TS4, ACK_c_r, M4));
+
+  (* === Continuous Authentication Phase: CH (Normal Mode) ===
+     CH receives client's continuous message, verifies Auth_CH,
+     then computes and sends Auth_CHCS to CS.
+     CH does NOT forward Auth_CS to CS in normal mode.
+  *)
+  in(c_CH, (PID_c3: bitstring,
+            sid_r: bitstring,
+            rid_r: bitstring,
+            TS5: timestamp,
+            Mbeh: bitstring,
+            Mdata: bitstring,
+            Auth_CH_r: bitstring,
+            Auth_CS_r: bitstring));
+
+  (* Verify Auth_CH = HMAC(KB_HMAC_ij, PIDc || TS5 || H(M_Beh)) *)
+  let Auth_CH_check =
+    HMAC(KBHMAC_ij,
+         Concat3(PID_c3, TSToBS(TS5), Hash(Mbeh))) in
+  if Auth_CH_r = Auth_CH_check then
+  event end_cont_c_at_CH(PID_c3);
+
+  (* CH unmasks behavior for local trust scoring *)
+  let Beh_rec = unmask_beh(Mbeh, PRG_beh(Kbeh_ij)) in
+
+  (* CH computes Auth_CHCS using KEM-derived CH-CS key
+     Auth_CHCS = HMAC(KHMAC_CHCS, CHID || PIDc || sid || rid || TS6 || Mdata)
+     This includes the masked gradient data for CS aggregation.
+  *)
+  new TS6: timestamp;
+  let Auth_CHCS =
+    HMAC(KHMAC_CHCS,
+         Concat6(CHID_r2, PID_c3, sid_r, rid_r, TSToBS(TS6), Mdata)) in
+
+  event begin_cont_CH_CS(CHID_r2);
+  out(CH_CS, (CHID_r2, PID_c3, sid_r, rid_r, TS6, Mdata, Auth_CHCS)).
+
+
+(* -------------------------------------------------------------------
+   CLOUD SERVER (CS) PROCESS
+   Phases:
+   1. Registration handling (client + CH)
+   2. Static authentication (receive M3+M1, verify, send ACK_CH+ACK_c)
+   3. HKDF key derivation (data plane + CH-CS plane)
+   4. Continuous authentication (one round, normal mode)
+   ------------------------------------------------------------------- *)
+let CloudServer =
+
+  (* === Registration Phase: Handle Client Registration === *)
+  in(c_CS_reg, (RID_rec: bitstring, PK_c_rec: pkey));
+   event RegisteredClientForStatic(RID_rec, K_id);
+   out(c_CS_reg, (ACK, RID_rec, K_id, s_c));
+
+  (* === Registration Phase: Handle CH Registration === *)
+  in(CH_CS_reg, (CHID_rec: bitstring, PK_CH_rec: pkey));
+  event RegisteredCHForStatic(CHID_rec);
+   out(CH_CS_reg, (ACK, CHID_rec, K_CH_reg)); 
+
+  (* === Static Authentication Phase: CS receives M3 (with forwarded M1) from CH === *)
+  in(CH_CS, ((PID_c: bitstring,
+              ct_c_CH: ciphertext,
+              ct_c_CS: ciphertext,
+              TS1: timestamp,
+              M1_r: bitstring),
+             CHID_r: bitstring,
+             ct_CH_CS: ciphertext,
+             TS2: timestamp,
+             M3_r: bitstring));
+
+  (* CS decapsulates CH-CS ciphertext to get CH-CS session key *)
+  let ss_CH_CS = kyber_decaps(ct_CH_CS, SK_CS) in
+  let protected_chcs_test =
+  mask_data(secret_chcs_test, PRG_data(sskeyToBS(ss_CH_CS))) in
+  out(CH_CS, protected_chcs_test);
+  (* Secrecy test for the CH-CS session key *)
+ 
+
+
+  (* Verify M3 = HMAC(KCH,CS, CHID || ctCH,CS || TS2 || PIDc || ctC,CH || ctC,CS || TS1) *)
+  let M3_check =
+    HMAC(K_CH_reg,
+         Concat7(CHID_r,
+                 cipherToBS(ct_CH_CS),
+                 TSToBS(TS2),
+                 PID_c,
+                 cipherToBS(ct_c_CH),
+                 cipherToBS(ct_c_CS),
+                 TSToBS(TS1))) in
+  if M3_r = M3_check then
+  event end_CH_at_CS(CHID_r);
+
+  (* CS receives ctC,CH from CH (in forwarded transcript) before verifying M1 *)
+  (* Verify M1 = HMAC(Kid, PIDc || ctC,CH || ctC,CS || TS1 || CHID) *)
+  let M1_check =
+    HMAC(K_id,
+         Concat5(PID_c,
+                 cipherToBS(ct_c_CH),
+                 cipherToBS(ct_c_CS),
+                 TSToBS(TS1),
+                 CHID_r)) in
+  if M1_r = M1_check then
+  event end_c_at_CS(PID_c);
+
+  (* CS decapsulates client-to-CS ciphertext to get C-CS session key *)
+  let ss_c_CS = kyber_decaps(ct_c_CS, SK_CS) in
+ let protected_ccs_test =
+  mask_data(secret_ccs_test, PRG_data(sskeyToBS(ss_c_CS))) in
+  out(CH_CS, protected_ccs_test);
+   (* === HKDF Key Derivation Phase (CS side) === *)
+  let sid = make_sid(PID_c, ct_c_CH, ct_c_CS, TS1) in
+ 
+
+  (* Data/Model Plane: C <-> CS (CS side)
+     RK_CS = HKDF-Extract(K_C,CS, salt_CS)
+     CKD_ij = derive_chainKey(RK_CS, sid, rid)
+     KDHMAC_ij = derive_HMACKey(CKD_ij, sid, rid)
+     Kdata_ij  = derive_dataKey(CKD_ij, sid, rid)
+  *)
+  let RK_CS     = HKDF_extract(sskeyToBS(ss_c_CS), salt_CS) in
+  let CKD_ij    = derive_chainKey(RK_CS, sid, round1) in
+  let KDHMAC_ij = derive_HMACKey(CKD_ij, sid, round1) in
+  let Kdata_ij  = derive_dataKey(CKD_ij, sid, round1) in
+
+  event CSDerivedDataPlane(PID_c, RK_CS, KDHMAC_ij, Kdata_ij, CKD_ij);
+
+  (* CH-CS Plane: CH <-> CS (CS side)
+     RK_CHCS = HKDF-Extract(K_CH,CS, salt_CS)
+     CK_CHCS = derive_chainKey(RK_CHCS, sid, rid)
+     KHMAC_CHCS = derive_HMACKey(CK_CHCS, sid, rid)
+  *)
+  let RK_CHCS    = HKDF_extract(sskeyToBS(ss_CH_CS), salt_CS) in
+  let CK_CHCS    = derive_chainKey(RK_CHCS, sid, round1) in
+  let KHMAC_CHCS = derive_HMACKey(CK_CHCS, sid, round1) in
+
+  (* Secrecy test for data key *)
+  let protected_data_test = mask_data(secret_data_test, PRG_data(Kdata_ij)) in
+  out(c_CH, protected_data_test);
+
+  (* === Static Authentication Phase: CS sends ACK_CH and ACK_c === *)
+  new TS3: timestamp;
+
+  (* ACKCH = HMAC(KCH,CS, PIDc || CHID || ctC,CH || TS1 || TS3) *)
+  let ACK_CH =
+    HMAC(sskeyToBS(ss_CH_CS),
+         Concat5(PID_c,
+                 CHID_r,
+                 cipherToBS(ct_c_CH),
+                 TSToBS(TS1),
+                 TSToBS(TS3))) in
+
+  (* ACKC = HMAC(KC,CS, PIDc || CHID || TS1 || TS3) *)
+  let ACK_c =
+    HMAC(sskeyToBS(ss_c_CS),
+         Concat4(PID_c, CHID_r, TSToBS(TS1), TSToBS(TS3))) in
+
+  event begin_CS_CH(CHID_r);
+  event begin_CS_c(PID_c);
+  out(CS_CH, (PID_c, CHID_r, TS3, ACK_CH, ACK_c));
+
+  (* === Continuous Authentication Phase: CS (Normal Mode) ===
+     CS receives CH's continuous report (Auth_CHCS) and verifies it.
+     CS uses the KEM-derived CH-CS key (KHMAC_CHCS) for verification.
+     CS does NOT directly verify client Auth_CS in normal mode.
+  *)
+  in(CH_CS, (CHID_r2: bitstring,
+             PID_c2: bitstring,
+             sid_r: bitstring,
+             rid_r: bitstring,
+             TS6: timestamp,
+             Mdata: bitstring,
+             Auth_CHCS_r: bitstring));
+
+  (* Re-derive keys for this round using received sid/rid *)
+  let CKD_ij_r    = derive_chainKey(RK_CS, sid_r, rid_r) in
+  let KDHMAC_ij_r = derive_HMACKey(CKD_ij_r, sid_r, rid_r) in
+  let Kdata_ij_r  = derive_dataKey(CKD_ij_r, sid_r, rid_r) in
+
+  let CK_CHCS_r    = derive_chainKey(RK_CHCS, sid_r, rid_r) in
+  let KHMAC_CHCS_r = derive_HMACKey(CK_CHCS_r, sid_r, rid_r) in
+
+  (* Verify Auth_CHCS = HMAC(KHMAC_CHCS, CHID || PIDc || sid || rid || TS6 || Mdata) *)
+  let Auth_CHCS_check =
+    HMAC(KHMAC_CHCS_r,
+         Concat6(CHID_r2, PID_c2, sid_r, rid_r, TSToBS(TS6), Mdata)) in
+  if Auth_CHCS_r = Auth_CHCS_check then
+  event end_cont_CH_at_CS(CHID_r2);
+
+  (* Normal mode: CS verifies CH-to-CS authenticator only.
+     CS unmasks gradient data for global aggregation.
+     Direct client Auth_CS verification is reserved for suspicious mode. *)
+  let Grad_rec = unmask_data(Mdata, PRG_data(Kdata_ij_r)) in
+  0.
+
+(* ===================================================================
+   SECTION 14: Main Process
+   =================================================================== *)
+process
+  (Client | ClusterHead | CloudServer)
